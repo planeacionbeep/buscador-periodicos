@@ -11,7 +11,6 @@ Uso local:
     set TURSO_TOKEN=...
     python servidor_busqueda.py
 
-En Railway estas variables se configuran en el dashboard.
 """
 
 import os
@@ -59,6 +58,7 @@ def buscar(termino, estado=None, fecha=None, limite=100):
         WHERE fts.texto MATCH ?
         {filtro_estado}
         {filtro_fecha}
+        ORDER BY p.fecha DESC
         LIMIT ?
     """.format(
         filtro_estado="AND p.estado = ?" if estado else "",
