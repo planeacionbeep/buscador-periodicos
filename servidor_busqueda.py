@@ -5,16 +5,11 @@ Servidor web para buscar en la base de periódicos oficiales (Turso)
 Variables de entorno necesarias:
     TURSO_URL    = libsql://tu-base.turso.io
     TURSO_TOKEN  = tu-token
-
-Uso local:
-    set TURSO_URL=libsql://...
-    set TURSO_TOKEN=...
-    python servidor_busqueda.py
-
 """
 
 import os
 import json
+import unicodedata
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -23,20 +18,19 @@ TURSO_URL   = os.environ.get("TURSO_URL", "")
 TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
 PORT        = int(os.environ.get("PORT", 8765))
 
+def normalizar(texto):
+    """Quita tildes y pasa a minúsculas para comparación."""
+    return unicodedata.normalize("NFD", texto).encode("ascii", "ignore").decode("ascii").lower()
+
 def turso_query(sql, params=None):
-    """Ejecuta una query en Turso via HTTP API."""
-    # Convertir URL libsql:// a https://
     base_url = TURSO_URL.replace("libsql://", "https://")
     url = f"{base_url}/v2/pipeline"
-
     stmt = {"type": "execute", "stmt": {"sql": sql}}
     if params:
         stmt["stmt"]["args"] = [{"type": "text", "value": str(p)} for p in params]
-
     body = json.dumps({"requests": [stmt, {"type": "close"}]}).encode("utf-8")
     req  = urllib.request.Request(
-        url,
-        data=body,
+        url, data=body,
         headers={
             "Authorization": f"Bearer {TURSO_TOKEN}",
             "Content-Type": "application/json"
@@ -44,14 +38,15 @@ def turso_query(sql, params=None):
     )
     with urllib.request.urlopen(req) as resp:
         data = json.loads(resp.read())
-
     result = data["results"][0]["response"]["result"]
-    cols   = [c["name"] for c in result["cols"]]
     rows   = [[cell.get("value", "") for cell in row] for row in result["rows"]]
     return rows
 
 def buscar(termino, estado=None, fecha=None, limite=100):
-    sql = """
+    termino_norm = normalizar(termino)
+
+    # ── Intento 1: FTS MATCH con término normalizado (sin tilde) ─────────────
+    sql_fts = """
         SELECT p.estado, p.fecha, p.seccion, p.texto, p.archivo_pdf
         FROM publicaciones p
         JOIN publicaciones_fts fts ON p.rowid = fts.rowid
@@ -62,16 +57,54 @@ def buscar(termino, estado=None, fecha=None, limite=100):
         LIMIT ?
     """.format(
         filtro_estado="AND p.estado = ?" if estado else "",
-        filtro_fecha="AND p.fecha = ?" if fecha else ""
+        filtro_fecha  ="AND p.fecha = ?"  if fecha  else ""
     )
 
-    params = [termino]
-    if estado: params.append(estado)
-    if fecha:  params.append(fecha)
-    params.append(limite)
+    params_fts = [termino_norm]
+    if estado: params_fts.append(estado)
+    if fecha:  params_fts.append(fecha)
+    params_fts.append(limite)
 
     try:
-        rows = turso_query(sql, params)
+        rows = turso_query(sql_fts, params_fts)
+        if rows:
+            return rows, None
+    except Exception:
+        pass
+
+    # ── Intento 2: FTS MATCH con término original ────────────────────────────
+    try:
+        params_orig = [termino]
+        if estado: params_orig.append(estado)
+        if fecha:  params_orig.append(fecha)
+        params_orig.append(limite)
+        rows = turso_query(sql_fts, params_orig)
+        if rows:
+            return rows, None
+    except Exception:
+        pass
+
+    # ── Fallback: LIKE sobre texto plano (lento pero seguro) ─────────────────
+    sql_like = """
+        SELECT estado, fecha, seccion, texto, archivo_pdf
+        FROM publicaciones
+        WHERE (lower(texto) LIKE ? OR lower(texto) LIKE ?)
+        {filtro_estado}
+        {filtro_fecha}
+        ORDER BY fecha DESC
+        LIMIT ?
+    """.format(
+        filtro_estado="AND estado = ?" if estado else "",
+        filtro_fecha  ="AND fecha = ?"  if fecha  else ""
+    )
+
+    params_like = [f"%{termino_norm}%", f"%{termino.lower()}%"]
+    if estado: params_like.append(estado)
+    if fecha:  params_like.append(fecha)
+    params_like.append(limite)
+
+    try:
+        rows = turso_query(sql_like, params_like)
         return rows, None
     except Exception as e:
         return [], str(e)
@@ -105,9 +138,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.responder_json({"resultados": [], "total": 0, "error": error})
                 return
 
+            termino_norm = normalizar(termino)
             resultados = []
             for estado_r, fecha_r, seccion, texto, archivo in filas:
-                idx = texto.lower().find(termino.lower())
+                texto_norm = normalizar(texto)
+                # Buscar fragmento usando texto normalizado pero mostrar original
+                idx = texto_norm.find(termino_norm)
+                if idx < 0:
+                    idx = texto.lower().find(termino.lower())
                 if idx >= 0:
                     inicio    = max(0, idx - 150)
                     fin       = min(len(texto), idx + 300)
@@ -209,9 +247,22 @@ fetch('/estados').then(r=>r.json()).then(data=>{
   data.estados.forEach(e=>{const opt=document.createElement('option');opt.value=e;opt.textContent=e;sel.appendChild(opt);});
 });
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')buscar();});
-function resaltar(texto,termino){
-  const re=new RegExp(`(${termino.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')})`,'gi');
-  return texto.replace(re,'<mark>$1</mark>');
+function normalizar(str){return str.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();}
+function resaltar(texto, termino){
+  const norm_term = normalizar(termino);
+  const result = [];
+  let i = 0;
+  while(i < texto.length){
+    const slice_norm = normalizar(texto.slice(i, i + termino.length));
+    if(slice_norm === norm_term){
+      result.push('<mark>' + texto.slice(i, i + termino.length) + '</mark>');
+      i += termino.length;
+    } else {
+      result.push(texto[i]);
+      i++;
+    }
+  }
+  return result.join('');
 }
 async function buscar(){
   const q=document.getElementById('q').value.trim();
@@ -228,7 +279,7 @@ async function buscar(){
   const res=await fetch('/buscar?'+params);
   const data=await res.json();
   document.getElementById('spinner').classList.remove('visible');
-  if(!data.resultados.length){document.getElementById('vacio').classList.add('visible');return;}
+  if(!data.resultados||!data.resultados.length){document.getElementById('vacio').classList.add('visible');return;}
   document.getElementById('info').innerHTML=`<span>${data.total}</span> resultado${data.total!==1?'s':''} para "<span>${q}</span>"`;
   const cont=document.getElementById('resultados');
   data.resultados.forEach(r=>{
@@ -243,14 +294,11 @@ async function buscar(){
 
 if __name__ == "__main__":
     if not TURSO_URL or not TURSO_TOKEN:
-        print(" Faltan variables de entorno TURSO_URL y TURSO_TOKEN")
-        print("   Ejecútalas antes de correr el servidor:")
-        print("   set TURSO_URL=libsql://tu-base.turso.io")
-        print("   set TURSO_TOKEN=tu-token")
+        print("Faltan variables de entorno TURSO_URL y TURSO_TOKEN")
         exit(1)
     server = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"\n Servidor corriendo en http://localhost:{PORT}")
-    print(f"   Presiona Ctrl+C para detener\n")
+    print(f"\nServidor corriendo en http://localhost:{PORT}")
+    print("Presiona Ctrl+C para detener\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
