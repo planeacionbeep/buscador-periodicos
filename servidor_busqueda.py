@@ -43,11 +43,10 @@ def turso_query(sql, params=None):
     return rows
 
 def buscar(termino, estado=None, fecha=None, limite=100):
-    # LIKE directo — más confiable que FTS para español con tildes y caracteres especiales
     sql = """
         SELECT estado, fecha, seccion, texto, archivo_pdf
         FROM publicaciones
-        WHERE (texto LIKE ? OR texto LIKE ? OR texto LIKE ?)
+        WHERE (texto LIKE ? OR texto LIKE ? OR texto LIKE ? OR texto LIKE ? OR texto LIKE ?)
         {filtro_estado}
         {filtro_fecha}
         ORDER BY fecha DESC
@@ -57,11 +56,18 @@ def buscar(termino, estado=None, fecha=None, limite=100):
         filtro_fecha  ="AND fecha = ?"  if fecha  else ""
     )
 
-    t = termino
+    t_orig  = termino
+    t_lower = termino.lower()
+    t_upper = termino.upper()
+    t_norm  = normalizar(termino)          # sin tilde: extorsion
+    t_norm_u = t_norm.upper()              # sin tilde mayúsculas: EXTORSION
+
     params = [
-        f"%{t}%",
-        f"%{t.upper()}%",
-        f"%{t.lower()}%",
+        f"%{t_orig}%",
+        f"%{t_lower}%",
+        f"%{t_upper}%",
+        f"%{t_norm}%",
+        f"%{t_norm_u}%",
     ]
     if estado: params.append(estado)
     if fecha:  params.append(fecha)
