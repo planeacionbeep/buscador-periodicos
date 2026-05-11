@@ -43,10 +43,18 @@ def turso_query(sql, params=None):
     return rows
 
 def buscar(termino, estado=None, fecha=None, limite=100):
+    # Usar solo la raíz normalizada — cubre todas las variantes
+    t_norm = normalizar(termino)  # extorsión → extorsion, extorsivo → extorsivo
+
+    # Tomar los primeros 7 chars como raíz si el término es largo
+    # extorsion → extorsi (cubre extorsión, extorsivo, extorsionar)
+    # secuestro → secuest (cubre secuestro, secuestrado)
+    raiz = t_norm[:7] if len(t_norm) >= 7 else t_norm
+
     sql = """
         SELECT estado, fecha, seccion, texto, archivo_pdf
         FROM publicaciones
-        WHERE (texto LIKE ? OR texto LIKE ? OR texto LIKE ? OR texto LIKE ? OR texto LIKE ?)
+        WHERE texto LIKE ?
         {filtro_estado}
         {filtro_fecha}
         ORDER BY fecha DESC
@@ -56,19 +64,7 @@ def buscar(termino, estado=None, fecha=None, limite=100):
         filtro_fecha  ="AND fecha = ?"  if fecha  else ""
     )
 
-    t_orig  = termino
-    t_lower = termino.lower()
-    t_upper = termino.upper()
-    t_norm  = normalizar(termino)          # sin tilde: extorsion
-    t_norm_u = t_norm.upper()              # sin tilde mayúsculas: EXTORSION
-
-    params = [
-        f"%{t_orig}%",
-        f"%{t_lower}%",
-        f"%{t_upper}%",
-        f"%{t_norm}%",
-        f"%{t_norm_u}%",
-    ]
+    params = [f"%{raiz}%"]
     if estado: params.append(estado)
     if fecha:  params.append(fecha)
     params.append(limite)
@@ -104,6 +100,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             filas, error = buscar(termino, estado, fecha)
+            print(f"DEBUG: {len(filas)} filas de Turso", flush=True)
             if error:
                 self.responder_json({"resultados": [], "total": 0, "error": error})
                 return
