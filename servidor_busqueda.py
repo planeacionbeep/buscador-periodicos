@@ -43,52 +43,11 @@ def turso_query(sql, params=None):
     return rows
 
 def buscar(termino, estado=None, fecha=None, limite=100):
-    termino_norm = normalizar(termino)
-
-    # ── Intento 1: FTS MATCH con término normalizado (sin tilde) ─────────────
-    sql_fts = """
-        SELECT p.estado, p.fecha, p.seccion, p.texto, p.archivo_pdf
-        FROM publicaciones p
-        JOIN publicaciones_fts fts ON p.rowid = fts.rowid
-        WHERE fts.texto MATCH ?
-        {filtro_estado}
-        {filtro_fecha}
-        ORDER BY p.fecha DESC
-        LIMIT ?
-    """.format(
-        filtro_estado="AND p.estado = ?" if estado else "",
-        filtro_fecha  ="AND p.fecha = ?"  if fecha  else ""
-    )
-
-    params_fts = [termino_norm]
-    if estado: params_fts.append(estado)
-    if fecha:  params_fts.append(fecha)
-    params_fts.append(limite)
-
-    try:
-        rows = turso_query(sql_fts, params_fts)
-        if rows:
-            return rows, None
-    except Exception:
-        pass
-
-    # ── Intento 2: FTS MATCH con término original ────────────────────────────
-    try:
-        params_orig = [termino]
-        if estado: params_orig.append(estado)
-        if fecha:  params_orig.append(fecha)
-        params_orig.append(limite)
-        rows = turso_query(sql_fts, params_orig)
-        if rows:
-            return rows, None
-    except Exception:
-        pass
-
-    # ── Fallback: LIKE sobre texto plano (lento pero seguro) ─────────────────
-    sql_like = """
+    # LIKE directo — más confiable que FTS para español con tildes y caracteres especiales
+    sql = """
         SELECT estado, fecha, seccion, texto, archivo_pdf
         FROM publicaciones
-        WHERE (lower(texto) LIKE ? OR lower(texto) LIKE ?)
+        WHERE (texto LIKE ? OR texto LIKE ? OR texto LIKE ?)
         {filtro_estado}
         {filtro_fecha}
         ORDER BY fecha DESC
@@ -98,13 +57,18 @@ def buscar(termino, estado=None, fecha=None, limite=100):
         filtro_fecha  ="AND fecha = ?"  if fecha  else ""
     )
 
-    params_like = [f"%{termino_norm}%", f"%{termino.lower()}%"]
-    if estado: params_like.append(estado)
-    if fecha:  params_like.append(fecha)
-    params_like.append(limite)
+    t = termino
+    params = [
+        f"%{t}%",
+        f"%{t.upper()}%",
+        f"%{t.lower()}%",
+    ]
+    if estado: params.append(estado)
+    if fecha:  params.append(fecha)
+    params.append(limite)
 
     try:
-        rows = turso_query(sql_like, params_like)
+        rows = turso_query(sql, params)
         return rows, None
     except Exception as e:
         return [], str(e)
