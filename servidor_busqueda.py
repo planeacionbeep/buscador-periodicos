@@ -1,10 +1,15 @@
 """
-servidor_busqueda.py
-Servidor web para buscar en la base de periódicos oficiales (Turso)
+Servidor web para buscar publicaciones en los periódicos oficiales de las 31 esentidades.
+Conecta a Turso (base de datos en la nube) y sirve una interfaz web de búsqueda.
 
 Variables de entorno necesarias:
     TURSO_URL    = libsql://tu-base.turso.io
-    TURSO_TOKEN  = tu-token
+    TURSO_TOKEN  = tu-token-de-turso
+
+Uso local:
+    $env:TURSO_URL   = "libsql://..."
+    $env:TURSO_TOKEN = "..."
+    python servidor_busqueda.py
 """
 
 import os
@@ -18,14 +23,17 @@ TURSO_URL   = os.environ.get("TURSO_URL", "")
 TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
 PORT        = int(os.environ.get("PORT", 8765))
 
+
 def normalizar(texto):
-    """Quita tildes y pasa a minúsculas para comparación."""
+    #Quita acentos y convierte a minúsculas. Permite comparar sin importar la acentuación.
     return unicodedata.normalize("NFD", texto).encode("ascii", "ignore").decode("ascii").lower()
 
+
 def turso_query(sql, params=None):
+    #Ejecuta una query en Turso via HTTP API y devuelve las filas como lista de listas.
     base_url = TURSO_URL.replace("libsql://", "https://")
-    url = f"{base_url}/v2/pipeline"
-    stmt = {"type": "execute", "stmt": {"sql": sql}}
+    url      = f"{base_url}/v2/pipeline"
+    stmt     = {"type": "execute", "stmt": {"sql": sql}}
     if params:
         stmt["stmt"]["args"] = [{"type": "text", "value": str(p)} for p in params]
     body = json.dumps({"requests": [stmt, {"type": "close"}]}).encode("utf-8")
@@ -42,14 +50,16 @@ def turso_query(sql, params=None):
     rows   = [[cell.get("value", "") for cell in row] for row in result["rows"]]
     return rows
 
-def buscar(termino, estado=None, fecha=None, limite=100):
-    # Usar solo la raíz normalizada — cubre todas las variantes
-    t_norm = normalizar(termino)  # extorsión → extorsion, extorsivo → extorsivo
 
-    # Tomar los primeros 7 chars como raíz si el término es largo
-    # extorsion → extorsi (cubre extorsión, extorsivo, extorsionar)
-    # secuestro → secuest (cubre secuestro, secuestrado)
-    raiz = t_norm[:7] if len(t_norm) >= 7 else t_norm
+def buscar(termino, estado=None, fecha=None, limite=100):
+    """
+    Busca publicaciones que contengan el término.
+    Usa la raíz del término normalizado (sin tilde, primeros 7 caracteres)
+    Ejemplo -> cubrir variantes: extorsión, extorsivo, extorsionar → busca 'extorsi'.
+    Filtra opcionalmente por entidad y/o fecha
+    """
+    t_norm = normalizar(termino)
+    raiz   = t_norm[:7] if len(t_norm) >= 7 else t_norm
 
     sql = """
         SELECT estado, fecha, seccion, texto, archivo_pdf
@@ -75,15 +85,20 @@ def buscar(termino, estado=None, fecha=None, limite=100):
     except Exception as e:
         return [], str(e)
 
+
 def get_estados():
+    """Devuelve la lista de estados disponibles para el filtro del buscador."""
     try:
         rows = turso_query("SELECT DISTINCT estado FROM publicaciones ORDER BY estado")
         return [r[0] for r in rows]
     except:
         return []
 
+
 class Handler(BaseHTTPRequestHandler):
+
     def log_message(self, format, *args):
+        # Silenciar el log de cada request para no ensuciar la consola
         pass
 
     def do_GET(self):
@@ -100,16 +115,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             filas, error = buscar(termino, estado, fecha)
-            print(f"DEBUG: {len(filas)} filas de Turso", flush=True)
             if error:
                 self.responder_json({"resultados": [], "total": 0, "error": error})
                 return
 
+            # Construir fragmento de contexto alrededor de la palabra encontrada
             termino_norm = normalizar(termino)
-            resultados = []
+            resultados   = []
             for estado_r, fecha_r, seccion, texto, archivo in filas:
                 texto_norm = normalizar(texto)
-                # Buscar fragmento usando texto normalizado pero mostrar original
                 idx = texto_norm.find(termino_norm)
                 if idx < 0:
                     idx = texto.lower().find(termino.lower())
@@ -150,6 +164,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", len(body))
         self.end_headers()
         self.wfile.write(body)
+
 
 HTML = """<!DOCTYPE html>
 <html lang="es">
